@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -66,7 +67,14 @@ func (WriterNopcloser) Close() error { return nil }
 func (i *IngesterVideo) doIngest(job *JobStruct) error {
 	i.logger.Debug().Msgf("ingestvideo %s/%s", job.collection, job.signature)
 
-	var err error
+	item, err := i.dbClient.GetItem(context.Background(), &mediaserverproto.ItemIdentifier{
+		Collection: job.collection,
+		Signature:  job.signature,
+	})
+	if err != nil {
+		return errors.Wrapf(err, "cannot get item %s/%s", job.collection, job.signature)
+	}
+
 	var fullpath string
 	if !strings.Contains(job.Path, "://") {
 		fullpath = strings.Join([]string{job.Storage.Filebase, job.Path}, "/")
@@ -82,23 +90,17 @@ func (i *IngesterVideo) doIngest(job *JobStruct) error {
 	folder := uuid.New().String()
 	os.MkdirAll(filepath.Join(i.tempDir, folder), 0755)
 	params := []string{"-i", "-"}
-	if slices.Contains(job.Missing, "$$web") {
-		if codec, ok := i.ffmpegOutputCodec["web"]; ok {
-			params = append(params, codec...)
-			params = append(params, filepath.ToSlash(filepath.Join(i.tempDir, folder, "web.mp4")))
-		}
+	if codec, ok := i.ffmpegOutputCodec["web"]; ok && slices.Contains(job.Missing, "$$web") {
+		params = append(params, codec...)
+		params = append(params, filepath.ToSlash(filepath.Join(i.tempDir, folder, "web.mp4")))
 	}
-	if slices.Contains(job.Missing, "$$shot$$3") {
-		if codec, ok := i.ffmpegOutputCodec["shots"]; ok {
-			params = append(params, codec...)
-			params = append(params, "-vf", fmt.Sprintf("fps=%d/%d", 25, job.Duration), filepath.ToSlash(filepath.Join(i.tempDir, folder, "shot%03d.png")))
-		}
+	if codec, ok := i.ffmpegOutputCodec["shots"]; ok && slices.Contains(job.Missing, "$$shot$$3") {
+		params = append(params, codec...)
+		params = append(params, "-vf", fmt.Sprintf("fps=%d/%d", 25, job.Duration), filepath.ToSlash(filepath.Join(i.tempDir, folder, "shot%03d.png")))
 	}
-	if slices.Contains(job.Missing, "$$preview") {
-		if codec, ok := i.ffmpegOutputCodec["preview"]; ok {
-			params = append(params, codec...)
-			params = append(params, filepath.ToSlash(filepath.Join(i.tempDir, folder, "preview.mp4")))
-		}
+	if codec, ok := i.ffmpegOutputCodec["preview"]; ok && slices.Contains(job.Missing, "$$preview") {
+		params = append(params, codec...)
+		params = append(params, filepath.ToSlash(filepath.Join(i.tempDir, folder, "preview.mp4")))
 	}
 	i.logger.Debug().Msgf("ffmpeg command: %s", strings.Join(params, " "))
 	subProcess := exec.Command(i.ffmpegPath, params...)
@@ -110,83 +112,97 @@ func (i *IngesterVideo) doIngest(job *JobStruct) error {
 		return errors.Wrap(err, "cannot run ffmpeg")
 	}
 
-	if slices.Contains(job.Missing, "$$web") {
-		if _, ok := i.ffmpegOutputCodec["web"]; ok {
-			source := filepath.Join(i.tempDir, folder, "web.mp4")
-			itemName := createCacheName(job.collection, job.signature+"$$web", source)
-			itemPath := job.Storage.Filebase + "/" + filepath.ToSlash(filepath.Join(job.Storage.Subitemdir, itemName))
-			sourceFP, err := os.Open(source)
+	var public = item.GetPublic() || slices.Contains(item.GetPublicActions(), "videoviewer")
+	var ingestType = mediaserverproto.IngestType_KEEP
+
+	if _, ok := i.ffmpegOutputCodec["web"]; ok && slices.Contains(job.Missing, "$$web") {
+		source := filepath.Join(i.tempDir, folder, "web.mp4")
+		itemName := createCacheName(job.collection, job.signature+"$$web", source)
+		itemPath := job.Storage.Filebase + "/" + filepath.ToSlash(filepath.Join(job.Storage.Subitemdir, itemName))
+		if _, err := writefs.Copy(i.vfs, source, itemPath); err != nil {
+			return errors.Wrapf(err, "cannot copy %s to %s", source, itemPath)
+		}
+		resp, err := i.dbClient.CreateItem(context.Background(), &mediaserverproto.NewItem{
+			Identifier: &mediaserverproto.ItemIdentifier{
+				Collection: job.collection,
+				Signature:  job.signature + "$$web",
+			},
+			Parent: &mediaserverproto.ItemIdentifier{
+				Collection: job.collection,
+				Signature:  job.signature,
+			},
+			Urn:        itemPath,
+			IngestType: &ingestType,
+			Public:     &public,
+		})
+		if err != nil {
+			return errors.Wrapf(err, "cannot create item %s/%s", job.collection, job.signature+"$$web")
+		}
+		i.logger.Info().Msgf("created item %s/%s: %s", job.collection, job.signature+"$$web", resp.GetMessage())
+	}
+	if _, ok := i.ffmpegOutputCodec["shots"]; ok && slices.Contains(job.Missing, "$$shot$$3") {
+		shots, err := filepath.Glob(filepath.ToSlash(filepath.Join(i.tempDir, folder, "shot???.png")))
+		if err != nil {
+			return errors.Wrapf(err, "cannot glob shots '%s'", filepath.Join(i.tempDir, folder, "shot???.png"))
+		}
+		for _, shot := range shots {
+			name := filepath.Base(shot)
+			num := name[4:7]
+			intNum, err := strconv.Atoi(num)
 			if err != nil {
-				return errors.Wrapf(err, "cannot open %s", source)
+				return errors.Wrapf(err, "cannot convert shot %s - %s", num, shot)
 			}
-			targetFP, err := writefs.Create(i.vfs, itemPath)
-			if err != nil {
-				sourceFP.Close()
-				return errors.Wrapf(err, "cannot create %s", itemPath)
+			shotSignature := fmt.Sprintf("%s$$shot$$%d", job.signature, intNum)
+			itemName := createCacheName(job.collection, shotSignature, shot)
+			targetPath := job.Storage.Filebase + "/" + filepath.ToSlash(filepath.Join(job.Storage.Subitemdir, itemName))
+			if _, err := writefs.Copy(i.vfs, shot, targetPath); err != nil {
+				return errors.Wrapf(err, "cannot copy '%s' to '%s'", shot, targetPath)
 			}
-			if _, err := io.Copy(targetFP, sourceFP); err != nil {
-				sourceFP.Close()
-				targetFP.Close()
-				return errors.Wrapf(err, "cannot copy %s to %s", source, itemPath)
-			}
-			sourceFP.Close()
-			targetFP.Close()
-			ingestType := mediaserverproto.IngestType_KEEP
-			public := true
 			resp, err := i.dbClient.CreateItem(context.Background(), &mediaserverproto.NewItem{
 				Identifier: &mediaserverproto.ItemIdentifier{
 					Collection: job.collection,
-					Signature:  job.signature + "$$web",
+					Signature:  shotSignature,
 				},
 				Parent: &mediaserverproto.ItemIdentifier{
 					Collection: job.collection,
 					Signature:  job.signature,
 				},
-				Urn:        itemPath,
+				Urn:        targetPath,
 				IngestType: &ingestType,
 				Public:     &public,
 			})
 			if err != nil {
-				return errors.Wrapf(err, "cannot create item %s/%s", job.collection, job.signature+"$$web")
+				return errors.Wrapf(err, "cannot create item %s/%s", job.collection, shotSignature)
 			}
-			i.logger.Info().Msgf("created item %s/%s: %s", job.collection, job.signature+"$$web", resp.GetMessage())
-		}
-	}
-	if slices.Contains(job.Missing, "$$shot$$3") {
-		if codec, ok := i.ffmpegOutputCodec["shots"]; ok {
-			params = append(params, codec...)
-			params = append(params, "-vf", fmt.Sprintf("fps=%d/%d", 25, job.Duration), filepath.ToSlash(filepath.Join(i.tempDir, folder, "shot%03d.png")))
+			i.logger.Info().Msgf("created item %s/%s: %s", job.collection, shotSignature, resp.GetMessage())
 		}
 	}
 	if slices.Contains(job.Missing, "$$preview") {
-		if codec, ok := i.ffmpegOutputCodec["preview"]; ok {
-			params = append(params, codec...)
-			params = append(params, filepath.ToSlash(filepath.Join(i.tempDir, folder, "preview.mp4")))
+		source := filepath.Join(i.tempDir, folder, "preview.mp4")
+		targetSignature := job.signature + "$$preview"
+		itemName := createCacheName(job.collection, targetSignature, source)
+		itemPath := job.Storage.Filebase + "/" + filepath.ToSlash(filepath.Join(job.Storage.Subitemdir, itemName))
+		if _, err := writefs.Copy(i.vfs, source, itemPath); err != nil {
+			return errors.Wrapf(err, "cannot copy %s to %s", source, itemPath)
 		}
+		resp, err := i.dbClient.CreateItem(context.Background(), &mediaserverproto.NewItem{
+			Identifier: &mediaserverproto.ItemIdentifier{
+				Collection: job.collection,
+				Signature:  targetSignature,
+			},
+			Parent: &mediaserverproto.ItemIdentifier{
+				Collection: job.collection,
+				Signature:  job.signature,
+			},
+			Urn:        itemPath,
+			IngestType: &ingestType,
+			Public:     &public,
+		})
+		if err != nil {
+			return errors.Wrapf(err, "cannot create item %s/%s", job.collection, targetSignature)
+		}
+		i.logger.Info().Msgf("created item %s/%s: %s", job.collection, targetSignature, resp.GetMessage())
 	}
-	/*
-		var cachePath string
-		switch job.ingestType {
-		case IngestType_KEEP:
-			cachePath = job.urn
-			targetWriter = WriterNopcloser{io.Discard}
-			i.logger.Debug().Msgf("keep %s/%s", job.collection.Name, job.signature)
-		case IngestType_COPY:
-			cacheName := createCacheName(job.collection.Name, job.signature, job.urn)
-			cachePath = strings.Join([]string{job.collection.Storage.Datadir, cacheName}, "/")
-			fullpath := strings.Join([]string{job.collection.Storage.Filebase, cachePath}, "/")
-			targetWriter, err = writefs.Create(i.vfs, fullpath)
-			i.logger.Debug().Msgf("copy %s/%s -> %s", job.collection.Name, job.signature, fullpath)
-		case IngestType_MOVE:
-			cacheName := createCacheName(job.collection.Name, job.signature, job.urn)
-			cachePath = strings.Join([]string{job.collection.Storage.Datadir, cacheName}, "/")
-			fullpath := strings.Join([]string{job.collection.Storage.Filebase, cachePath}, "/")
-			targetWriter, err = writefs.Create(i.vfs, fullpath)
-			i.logger.Debug().Msgf("move %s/%s -> %s", job.collection.Name, job.signature, fullpath)
-		default:
-			return errors.Errorf("unknown ingest type %d", job.ingestType)
-		}
-	*/
 	return nil
 }
 

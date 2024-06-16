@@ -5,8 +5,8 @@ go 1.22.4
 require (
 	emperror.dev/errors v0.8.1
 	github.com/BurntSushi/toml v1.4.0
-	github.com/je4/filesystem/v3 v3.0.8
-	github.com/je4/genericproto/v2 v2.0.3
+	github.com/google/uuid v1.6.0
+	github.com/je4/filesystem/v3 v3.0.9
 	github.com/je4/mediaserveraction/v2 v2.0.17
 	github.com/je4/mediaserverproto/v2 v2.0.30
 	github.com/je4/miniresolver/v2 v2.0.15
@@ -14,7 +14,6 @@ require (
 	github.com/je4/utils/v2 v2.0.38
 	gitlab.switch.ch/ub-unibas/go-ublogger v0.0.0-20240612084645-ba4f8357c0d4
 	google.golang.org/grpc v1.64.0
-	google.golang.org/protobuf v1.34.2
 )
 
 require (
@@ -36,7 +35,7 @@ require (
 	github.com/goccy/go-json v0.10.3 // indirect
 	github.com/golang-jwt/jwt/v5 v5.2.1 // indirect
 	github.com/google/certificate-transparency-go v1.2.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
+	github.com/je4/genericproto/v2 v2.0.3 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.8 // indirect
@@ -67,6 +66,7 @@ require (
 	golang.org/x/sys v0.21.0 // indirect
 	golang.org/x/text v0.16.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240610135401-a8a62080eff3 // indirect
+	google.golang.org/protobuf v1.34.2 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/klog/v2 v2.120.1 // indirect
